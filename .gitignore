@@ -1,0 +1,14 @@
+# Mac のインストール先 (Python の環境・重み・キャッシュ) と、その場所の設定
+.local/
+mac/.env
+
+# 手元で試すときに app/ に置く重み
+app/weights/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS (外付けの exFAT だと ._ で始まるファイルが勝手にできる)
+._*
+.DS_Store

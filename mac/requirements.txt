@@ -1,0 +1,3 @@
+# Mac で動かすのに要るもの。Space と同じもの + gradio (Space では Space の側が入れてくれる)
+-r ../app/requirements.txt
+gradio==6.31.0
