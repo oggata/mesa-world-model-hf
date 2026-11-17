@@ -19,11 +19,20 @@ class WorldModel(nn.Module):
     n_npc > 0 のときは、ほかの住民 (NPC) の数の並び (B,T,n_npc,npc_f) も受け取る。1 人 = 1 トークンにして、
     各フレームの画像のトークンの後ろに並べる (位置 t には「次のフレーム t+1 で住民がどこにいるか」を入れる。
     住民の動きはシミュレーターが決めるので、世界モデルは「そこにいるときの見た目」を描くだけでよい)。
-    n_npc = 0 なら前の版とまったく同じ形 (重みの名前も同じ)。
+
+    n_mem > 0 のときは「長い記憶」も持つ。直近 hist フレームより前のフレームを mem_stride おきに n_mem 枚、
+    mem_grid×mem_grid に粗くしたトークンにして先頭に並べる (その間に取った行動も足す)。今のフレームのトークンは
+    記憶をすべて見られ、記憶は今を見ない。振り返ったときや 1 周して戻ったときに、さっき見た景色を思い出すため。
+    エピソードの始めなど、記憶が無いところは「無い」印 (mem_ok = 0) を付ける。
+
+    n_npc = 0, n_mem = 0 なら前の版とまったく同じ形 (重みの名前も同じ) なので、前に保存した重みも読める。
     """
-    def __init__(self, feat_dim, n_tok, hist, act_dim=None, n_actions=None, d=256, depth=6, heads=8, n_npc=0, npc_f=6):
+    def __init__(self, feat_dim, n_tok, hist, act_dim=None, n_actions=None, d=256, depth=6, heads=8, n_npc=0, npc_f=6,
+                 n_mem=0, mem_grid=4, mem_stride=1):
         super().__init__()
         self.hist, self.n_tok, self.n_npc = hist, n_tok, n_npc
+        self.n_mem, self.mem_grid, self.mem_stride = n_mem, mem_grid, mem_stride
+        self.grid = int(round(math.sqrt(n_tok)))
         self.inp = nn.Linear(feat_dim, d)
         if n_actions is not None:
             self.act = nn.Embedding(n_actions, d)
@@ -34,17 +43,52 @@ class WorldModel(nn.Module):
         if n_npc:
             self.npc = nn.Sequential(nn.Linear(npc_f, d), nn.GELU(), nn.Linear(d, d))
             self.npc_id = nn.Parameter(torch.randn(1, 1, n_npc, d) * 0.02)      # 何番目の住民か (同じ人をフレームをまたいで追う)
+        if n_mem:
+            self.mem_pos_tok = nn.Parameter(torch.randn(1, 1, mem_grid ** 2, d) * 0.02)   # 記憶のトークンの場所
+            self.mem_pos_t = nn.Parameter(torch.randn(1, n_mem, 1, d) * 0.02)             # 何枚前の記憶か
+            self.mem_ok = nn.Embedding(2, d)                                               # 記憶があるか (0 = 無い)
         layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, activation="gelu",
                                            batch_first=True, norm_first=True)
         self.blocks = nn.TransformerEncoder(layer, depth, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d)
         self.out = nn.Linear(d, feat_dim)
         nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
-        f = torch.arange(hist).repeat_interleave(n_tok + n_npc)
-        self.register_buffer("mask", f[None, :] > f[:, None], persistent=False)  # True = 見てはいけない
+        self.n_mem_tok = n_mem * mem_grid ** 2
+        f = torch.cat([torch.full((self.n_mem_tok,), -1), torch.arange(hist).repeat_interleave(n_tok + n_npc)])
+        self.register_buffer("mask", f[None, :] > f[:, None], persistent=False)  # True = 見てはいけない (記憶 = -1 は今を見ない)
 
-    def forward(self, z, a, n=None):
+    @property
+    def span(self):
+        """想像に渡すと全部使われる、本物のフレームの数 (直近 hist + 記憶の届く範囲)"""
+        return self.hist + self.n_mem * self.mem_stride
+
+    def pool(self, z):
+        """(…,N,D) の特徴 → (…,mem_grid², D) に粗くする (記憶のトークン)"""
+        sh, D = z.shape[:-2], z.shape[-1]
+        x = z.reshape(-1, self.grid, self.grid, D).permute(0, 3, 1, 2).float()
+        x = F.adaptive_avg_pool2d(x, self.mem_grid)
+        return x.flatten(2).transpose(1, 2).reshape(*sh, self.mem_grid ** 2, D)
+
+    def memory(self, pooled, acts, start, valid=None):
+        """pooled: 粗くしたフレームの list (各 (B,m,D)、時間の順) / acts: (B,F) か (B,F,A) フレーム j で取った行動 /
+        start: 今の窓の先頭のフレームの番号 / valid: (B,F) そのフレームがあるか (無ければ 0 以上は全部ある)。
+        返り値: 記憶 (start - mem_stride × k, k = n_mem..1 のフレーム) の (特徴 (B,M,m,D), 行動 (B,M,s), あるか (B,M))。
+        行動は、その記憶のフレームから次の記憶のフレームまでの間に取った mem_stride 個"""
+        s, B, dev = self.mem_stride, pooled[0].shape[0], pooled[0].device
+        zs, as_, ok = [], [], []
+        for k in range(self.n_mem, 0, -1):
+            j = start - s * k
+            if j >= 0:
+                zs.append(pooled[j]); as_.append(acts[:, j:j + s])
+                ok.append(valid[:, j] if valid is not None else torch.ones(B, dtype=torch.bool, device=dev))
+            else:
+                zs.append(torch.zeros_like(pooled[0])); as_.append(torch.zeros_like(acts[:, :s]))
+                ok.append(torch.zeros(B, dtype=torch.bool, device=dev))
+        return torch.stack(zs, 1), torch.stack(as_, 1), torch.stack(ok, 1)
+
+    def forward(self, z, a, n=None, mem=None):
         # z: (B,T,N,D) / a: (B,T) 行動番号 か (B,T,A) 連続値 / n: (B,T,K,F) 住民 (無ければ「誰もいない」)。位置 t の出力が t+1 の予測
+        # mem: memory() の返り値 (無ければ「記憶なし」)
         B, T, N, D = z.shape
         h = self.inp(z) + self.pos_tok + self.act(a)[:, :, None, :]
         if self.n_npc:
@@ -53,24 +97,40 @@ class WorldModel(nn.Module):
             h = torch.cat([h, self.npc(n.to(h.dtype)) + self.npc_id + self.act(a)[:, :, None, :]], 2)
         h = h + self.pos_t[:, -T:]
         L = h.shape[2]
-        h = self.blocks(h.reshape(B, T * L, -1), mask=self.mask[:T * L, :T * L])
-        return z + self.out(self.norm(h)).reshape(B, T, L, -1)[:, :, :N]
+        h = h.reshape(B, T * L, -1)
+        Lm = self.n_mem_tok
+        if self.n_mem:
+            if mem is None:
+                mem = (torch.zeros(B, self.n_mem, self.mem_grid ** 2, D, device=z.device),
+                       torch.zeros_like(a[:, :1]).unsqueeze(1).expand(B, self.n_mem, self.mem_stride, *a.shape[2:]),
+                       torch.zeros(B, self.n_mem, dtype=torch.bool, device=z.device))
+            mz, ma, ok = mem
+            hm = (self.inp(mz) + self.mem_pos_tok + self.mem_pos_t + self.act(ma).sum(2)[:, :, None, :]
+                  + self.mem_ok(ok.long())[:, :, None, :])
+            h = torch.cat([hm.reshape(B, Lm, -1).to(h.dtype), h], 1)
+        h = self.blocks(h, mask=self.mask[:Lm + T * L, :Lm + T * L])
+        return z + self.out(self.norm(h[:, Lm:])).reshape(B, T, L, -1)[:, :, :N]
 
 
 @torch.no_grad()
 def imagine(model, z_ctx, a_seq, n_seq=None):
     """想像の中で先へ進める (シミュレータとしての使い方)。
-    z_ctx: (B,C,N,D) 実際に見た直近 C フレーム / a_seq: (B, C-1+K, ...) 文脈の先頭フレームからの行動
+    z_ctx: (B,C,N,D) 実際に見た直近 C フレーム (長い記憶を持つモデルは、model.span フレームまで渡すと全部使う)
+    a_seq: (B, C-1+K, ...) 文脈の先頭フレームからの行動
     n_seq: (B, C-1+K, n_npc, F) 各行動の「あと」のフレームでの住民 (a_seq と同じ並び。無ければ住民なし)
     返り値: (B,K,N,D) 想像した K フレーム先までの特徴。予測を次の入力に使い回すので、先ほど誤差が積もる"""
-    H = model.hist
+    H, M = model.hist, getattr(model, "n_mem", 0)
     zs = list(z_ctx.float().unbind(1)); C = len(zs)
+    pz = [model.pool(z) for z in zs] if M else None          # 記憶に使う、粗くしたフレーム
     K = a_seq.shape[1] - (C - 1)
     for _ in range(K):
         t = len(zs) - 1; lo = max(0, t - H + 1)
+        mem = model.memory(pz, a_seq, lo) if M else None
         pred = model(torch.stack(zs[lo:], 1), a_seq[:, lo:t + 1],
-                     None if n_seq is None else n_seq[:, lo:t + 1])[:, -1]
+                     None if n_seq is None else n_seq[:, lo:t + 1], mem)[:, -1]
         zs.append(pred.float())
+        if M:
+            pz.append(model.pool(zs[-1]))
     return torch.stack(zs[C:], 1)
 
 
@@ -165,6 +225,8 @@ class DinoEncoder:
 
     @torch.no_grad()
     def __call__(self, imgs, grid):
+        if imgs.shape[-1] != 224:                    # 大きく描いた画像は DINOv2 の大きさ (224) に縮めて渡す
+            imgs = F.interpolate(imgs, size=224, mode="bilinear", antialias=True)
         p = self.model.forward_features((imgs - self.mean) / self.std)["x_norm_patchtokens"]
         B, D = p.shape[0], p.shape[-1]
         p = p.float().transpose(1, 2).reshape(B, D, 16, 16)

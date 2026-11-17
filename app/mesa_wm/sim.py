@@ -36,11 +36,13 @@ class Simulator:
         self.hist, self.grid_tok = cfg["hist"], cfg["tok_grid"]
         self.move, self.rot = cfg["move"], math.radians(cfg["rot_deg"])
         self.img, self.thumb, self.size = cfg["img"], cfg["thumb"], cfg["grid"]
+        self.render_px = cfg.get("render_px", self.img)   # 描く大きさ (DINOv2 には 224 に縮めて渡す)
         n_tok, D = self.grid_tok ** 2, cfg["feat_dim"]
         ld = lambda name: load_file(os.path.join(model_dir, name), device=device)
 
         self.wm = WorldModel(D, n_tok, self.hist, n_actions=len(self.actions), **cfg["world_model"]).to(device).eval()
         self.wm.load_state_dict(ld("world_model.safetensors"))
+        self.span = self.wm.span                      # 覚えておく本物のフレームの数 (直近 hist + 長い記憶の届く範囲)
         self.dec = Decoder(D, self.grid_tok, **cfg["decoder"]).to(device).eval()
         self.dec.load_state_dict(ld("decoder.safetensors"))
         self.inv = None
@@ -98,7 +100,7 @@ class Simulator:
     def draw(self, poses, people=None):
         p = torch.tensor(poses, dtype=torch.float32, device=self.device)
         pp = None if people is None else torch.tensor(np.stack(people), dtype=torch.float32, device=self.device)
-        return self.renderer.render(p[:, 0], p[:, 1], p[:, 2], self.img, self.img, people=pp)
+        return self.renderer.render(p[:, 0], p[:, 1], p[:, 2], self.render_px, self.render_px, people=pp)
 
     def npc_feats(self, pose, people_pose):
         """プレイヤーの位置と向き + 住民の本当の位置 → 世界モデルに渡す数の並び (K,6)"""
@@ -150,7 +152,7 @@ class Simulator:
         sync=True なら「いま本当に見えているもの」から想像を始める。False なら前回の想像の続きから (夢の中を歩き続ける)。
         hint=False なら、復元器に本物の手がかり画像を渡さない (世界モデルの予測した特徴だけで絵にする)"""
         city = self.city(state["seed"])
-        H = self.hist
+        H = self.span                                 # 覚えておくフレームの数 (記憶の分も)
         z_ctx = (state["z_real"] if sync else state["z_dream"]).to(self.device)
         a_seq = torch.tensor([state["a_hist"] + list(acts)], device=self.device)
         # 本物の環境で同じ行動を実行する。住民もシミュレーターの決まりで歩く (世界モデルには、その結果を数の並びで渡す)

@@ -4,6 +4,7 @@ mac/.env
 
 # 手元で試すときに app/ に置く重み
 app/weights/
+app/weights_flow/
 
 __pycache__/
 *.pyc

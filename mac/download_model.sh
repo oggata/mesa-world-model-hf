@@ -5,6 +5,7 @@
 #   ./mac/download_model.sh ユーザー名/リポジトリ名   → 自分で学習して上げたモデル
 #
 # 落としたモデルの場所は mac/.env に覚えておき、run.sh はそれを使う。
+# 拡散版 (config.json の model_type が "flow") のモデルは別の名前 (FLOW_MODEL_DIR) で覚えておき、run_flow.sh が使う。
 # モデルリポジトリが非公開なら、先に hf auth login (読み取りできるトークン) が要る。
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
@@ -33,7 +34,14 @@ print("DINOv2 を落とします →", os.environ["TORCH_HOME"])
 torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
 EOF
 
-save_env MODEL_DIR "$DEST"
 echo
-echo "落とせました。次はシミュレーターを起動します:"
-echo "  ./mac/run.sh"
+if grep -q '"model_type": *"flow"' "$DEST/config.json"; then
+  # 拡散版 (world_model_mesa_flow.ipynb) のモデルは別に覚えておく (1 回で当てる版の MODEL_DIR は上書きしない)
+  save_env FLOW_MODEL_DIR "$DEST"
+  echo "落とせました (拡散版)。次はシミュレーターを起動します:"
+  echo "  ./mac/run_flow.sh"
+else
+  save_env MODEL_DIR "$DEST"
+  echo "落とせました。次はシミュレーターを起動します:"
+  echo "  ./mac/run.sh"
+fi

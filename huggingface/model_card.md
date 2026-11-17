@@ -175,7 +175,9 @@ Everything is trained from scratch in a single notebook ([`colab/world_model_mes
 | **`sharp`** ✅ | 16×16 | 128×128 | 384 · 6 · ~11M | 20k | 2 | L1 + perceptual + GAN, context image | 40–60 min |
 | `sharper` | 16×16 | 128×128 | 512 · 8 · ~26M | 30k | 2 | wider, 2 res blocks | 1.5–2.5 h |
 
-Key hyper-parameters for `sharp`: batch 32, AdamW with lr 3e-4. The world model is trained with a 2-step rollout loss, feeding its own prediction back as input, which reduces blurring over long horizons. The decoder is trained for 10k steps with perceptual weight 0.2 and GAN weight 0.1. To make it robust to imagined features, training adds noise of 0.3 to the features and uses imagined features for 25% of samples. The inverse-dynamics head is trained for 3k steps.
+> **Note:** the current notebook's `sharp` / `sharper` presets add several improvements that the released `sharp-v01` weights do **not** use yet: a long-term memory of older frames (14 frames pooled to 4×4 tokens, every 2nd frame, reaching 28 steps back), a longer rollout curriculum (up to 4–6 steps) with input noise, an extra cosine loss, scripted maneuvers in the data (spin in place, turn around, go and come back), more training towns, and a 256×256 decoder. Weights trained this way store the extra settings in `config.json` (`world_model.n_mem`, `render_px`, …), and the Space code reads both kinds of weights.
+
+Key hyper-parameters for `sharp-v01`: batch 32, AdamW with lr 3e-4. The world model is trained with a 2-step rollout loss, feeding its own prediction back as input, which reduces blurring over long horizons. The decoder is trained for 10k steps with perceptual weight 0.2 and GAN weight 0.1. To make it robust to imagined features, training adds noise of 0.3 to the features and uses imagined features for 25% of samples. The inverse-dynamics head is trained for 3k steps.
 
 ## Evaluation
 
