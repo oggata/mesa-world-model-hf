@@ -204,6 +204,7 @@ MODEL_DIR=/path/to/export_sharp ./mac/run.sh
 1. **Colab で学習する**: `colab/world_model_mesa_flow.ipynb` を開いて「すべてのセルを実行」。設定は今までのノートブックと同じで、
    拡散版の設定 (`FLOW_DEPTH`, `FLOW_STEPS`, `FLOW_TEMP`, `PLAN_FLOW_STEPS`) が足してあります。
    - 先に今までのノートブックを**同じ `PRESET` で**回してあれば、学習データと復元器を借りるので、その分早く終わります。評価では今までの世界モデルとも並べて比べます
+   - 借りた復元器は、拡散版が想像した特徴で短く学び直します (`DEC_FLOW_TUNE`。sharp で 4000 回)。そのまま使うと、建物などにマス目のような模様が出やすいためです。学び直す前と後を並べた図も出ます
    - 書き出しは Drive の `export_flow_<PRESET>/` (今までの `export_<PRESET>/` は上書きしません)
 2. **Hugging Face に置く**: 今までと別のモデルリポジトリ (例: `あなたのユーザー名/mesa-world-model-flow`) にします。ノートブックの最後のセルの `HF_MODEL_REPO` に書くか、`hf upload あなたのユーザー名/mesa-world-model-flow /path/to/export_flow_sharp .`
 3. **Mac で動かす**:
